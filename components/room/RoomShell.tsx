@@ -127,6 +127,7 @@ export function RoomShell({
     );
 
     const onMutedByCreator = useCallback(() => {
+        console.log("[RoomShell] force muted by creator");
         forceMute();
     }, [forceMute]);
 

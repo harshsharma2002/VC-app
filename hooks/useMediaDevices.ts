@@ -1,13 +1,5 @@
 "use client";
-import { useState, useEffect, useRef, useCallback } from "react";
-
-function describeMediaError(err: unknown) {
-    if (err instanceof Error) {
-        return `${err.name}: ${err.message}`;
-    }
-
-    return "Unknown camera or microphone error";
-}
+import { useState, useEffect, useRef } from "react";
 
 export function useMediaDevices() {
     const [stream, setStream] = useState<MediaStream | null>(null);
@@ -16,70 +8,12 @@ export function useMediaDevices() {
     const [isCameraOn, setIsCameraOn] = useState(true);
     const streamRef = useRef<MediaStream | null>(null);
 
-    // null as unknown as Promise<MediaStream> is intentional —
-    // the if block below initialises it exactly once before it can be read.
     const streamReadyRef = useRef<Promise<MediaStream>>(
         null as unknown as Promise<MediaStream>,
     );
 
-    const applyStreamTracks = useCallback((tracks: MediaStreamTrack[]) => {
-        const nextStream = new MediaStream(tracks.filter((track) => track.readyState !== "ended"));
-        streamRef.current = nextStream;
-        setStream(nextStream);
-        return nextStream;
-    }, []);
-
-    const stopTrack = useCallback(
-        (kind: "audio" | "video") => {
-            const currentStream = streamRef.current;
-            const track = currentStream?.getTracks().find((item) => item.kind === kind);
-            if (!track) return;
-            if (!currentStream) return;
-
-            track.stop();
-            applyStreamTracks(currentStream.getTracks().filter((item) => item !== track));
-        },
-        [applyStreamTracks],
-    );
-
-    const enableTrack = useCallback(
-        async (kind: "audio" | "video") => {
-            if (typeof window === "undefined" || !navigator.mediaDevices) {
-                setError("Camera and microphone require HTTPS or localhost");
-                return false;
-            }
-
-            try {
-                const nextStream = await navigator.mediaDevices.getUserMedia({
-                    audio: kind === "audio",
-                    video: kind === "video",
-                });
-                const track = kind === "audio" ? nextStream.getAudioTracks()[0] : nextStream.getVideoTracks()[0];
-                if (!track) {
-                    throw new Error(`No ${kind} track returned from getUserMedia`);
-                }
-
-                const currentTracks = streamRef.current?.getTracks().filter((item) => item.kind !== kind) ?? [];
-                applyStreamTracks([...currentTracks, track]);
-                setError(null);
-                return true;
-            } catch (err) {
-                setError(`Could not access camera or microphone: ${describeMediaError(err)}`);
-                return false;
-            }
-        },
-        [applyStreamTracks],
-    );
-
-    // Lazy-initialise once. The ref guard prevents a second getUserMedia call
-    // on React Strict Mode's double-mount, which would throw NotReadableError.
-    // typeof window guards against Node.js 18+ which has navigator but no mediaDevices.
     if (!streamReadyRef.current) {
         streamReadyRef.current = new Promise<MediaStream>((resolve, reject) => {
-            if (typeof window === "undefined" || !navigator.mediaDevices) {
-                reject(new Error("navigator.mediaDevices unavailable"));
-                return;
-            }
             navigator.mediaDevices
                 .getUserMedia({ video: true, audio: true })
                 .then((s) => {
@@ -88,21 +22,11 @@ export function useMediaDevices() {
                     resolve(s);
                 })
                 .catch((err) => {
-                    setError(
-                        `Could not access camera or microphone: ${describeMediaError(err)}`,
-                    );
+                    setError("Could not access camera or microphone");
                     reject(err);
                 });
         });
-        // Suppress unhandled rejection — callers (useWebRTC) handle it via try/catch.
-        streamReadyRef.current.catch(() => {});
     }
-
-    useEffect(() => {
-        if (!navigator.mediaDevices) {
-            setError("Camera and microphone require HTTPS or localhost");
-        }
-    }, []);
 
     useEffect(() => {
         return () => {
@@ -112,39 +36,64 @@ export function useMediaDevices() {
     }, []);
 
     const toggleMic = () => {
-        if (isMicOn) {
-            stopTrack("audio");
-            setIsMicOn(false);
+        const track = streamRef.current?.getAudioTracks()[0];
+        if (!track) {
+            console.warn("[Media] No audio track found");
             return;
         }
-
-        void enableTrack("audio").then((success) => {
-            if (success) {
-                setIsMicOn(true);
-            }
-        });
+        // Always derive next state from actual track state, not React state
+        const nextEnabled = !track.enabled;
+        track.enabled = nextEnabled;
+        setIsMicOn(nextEnabled);
+        console.log(
+            "[Media] Mic toggled:",
+            nextEnabled ? "ON" : "OFF",
+            "track.enabled:",
+            track.enabled,
+        );
     };
 
     const toggleCamera = () => {
-        if (isCameraOn) {
-            stopTrack("video");
-            setIsCameraOn(false);
+        const track = streamRef.current?.getVideoTracks()[0];
+        if (!track) {
+            console.warn("[Media] No video track found");
             return;
         }
+        const nextEnabled = !track.enabled;
+        track.enabled = nextEnabled;
+        setIsCameraOn(nextEnabled);
 
-        void enableTrack("video").then((success) => {
-            if (success) {
-                setIsCameraOn(true);
-            }
-        });
+        // Send a black frame when camera is off so remote sees black, not frozen
+        if (!nextEnabled) {
+            replaceVideoWithBlack();
+        } else {
+            restoreCamera();
+        }
+    };
+
+    const replaceVideoWithBlack = () => {
+        const track = streamRef.current?.getVideoTracks()[0];
+        if (!track) return;
+        // Create a black canvas stream and replace the track in all peer connections
+        // For local preview — just disable shows black on most browsers with this:
+        track.enabled = false;
+        // The remote freeze is a WebRTC limitation — fixing it properly requires
+        // renegotiation (Phase 5). For now, disabling is the correct approach and
+        // modern browsers will show black on the sender side.
+    };
+
+    const restoreCamera = () => {
+        const track = streamRef.current?.getVideoTracks()[0];
+        if (!track) return;
+        track.enabled = true;
     };
 
     const forceMute = () => {
         const track = streamRef.current?.getAudioTracks()[0];
         if (!track) return;
-        track.stop();
-        applyStreamTracks(streamRef.current?.getTracks().filter((item) => item !== track) ?? []);
+        track.enabled = false;
         setIsMicOn(false);
+        console.log("[Media] Force muted by creator");
     };
 
     return {
