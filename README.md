@@ -34,3 +34,23 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## Deployment Setup
+
+This app needs these environment variables in production:
+
+- `DATABASE_URL` for PostgreSQL
+- `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` for Better Auth Google login
+- `NEXT_PUBLIC_APP_URL` for the public app origin, such as your Vercel URL
+- `NEXT_PUBLIC_SOCKET_URL` for the Socket.IO server URL
+
+Use [`.env.example`](.env.example) as the template for your deployment env file.
+
+Production checks:
+
+```bash
+pnpm install
+pnpm run build
+```
+
+If you deploy on Vercel, set the variables in the project settings before the first production deploy. If your socket server is deployed separately, point `NEXT_PUBLIC_SOCKET_URL` at that service instead of the app URL.
