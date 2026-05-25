@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { io } from "socket.io-client";
 import type { Socket } from "socket.io-client";
+import { ChatMessage } from "./useChat";
 
 type UseSocketOptions = {
     socketRef: React.RefObject<Socket | null>;
@@ -18,6 +19,8 @@ type UseSocketOptions = {
     onIceCandidate: (data: any) => void;
     onMutedByCreator: () => void;
     onKicked: () => void;
+    onChatHistory: (history: ChatMessage[]) => void; // ← new
+    onChatMessage: (msg: ChatMessage) => void;
 };
 
 export function useSocket(options: UseSocketOptions) {
@@ -68,12 +71,16 @@ export function useSocket(options: UseSocketOptions) {
         socket.on("signal:ice-candidate", options.onIceCandidate);
         socket.on("control:muted-by-creator", options.onMutedByCreator);
         socket.on("control:kicked", options.onKicked);
+        socket.on("chat:history", options.onChatHistory);
+        socket.on("chat:message", options.onChatMessage);
 
         socket.on("room:error", (data) => {
             console.error("Room error:", data.message);
         });
 
         return () => {
+            socket.off("chat:history", options.onChatHistory);
+            socket.off("chat:message", options.onChatMessage);
             socket.disconnect();
             options.socketRef.current = null;
         };

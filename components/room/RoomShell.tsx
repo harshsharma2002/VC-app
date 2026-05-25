@@ -4,8 +4,10 @@ import { useRouter } from "next/navigation";
 import { useMediaDevices } from "@/hooks/useMediaDevices";
 import { useWebRTC } from "@/hooks/useWebRTC";
 import { useSocket } from "@/hooks/useSocket";
+import { useChat } from "@/hooks/useChat";
 import { VideoGrid } from "./VideoGrid";
 import { Controls } from "./Controls";
+import { ChatPanel } from "./ChatPanel";
 import type { Socket } from "socket.io-client";
 
 type Props = {
@@ -46,6 +48,19 @@ export function RoomShell({
         removePeer,
     } = useWebRTC(stream, socketRef, streamReady);
 
+    const {
+        messages,
+        sendMessage,
+        unreadCount,
+        isOpen: chatOpen,
+        openChat,
+        closeChat,
+        onChatHistory,
+        onChatMessage,
+    } = useChat(socketRef, roomId);
+
+    // ── WebRTC callbacks (unchanged) ──────────────────────────────────────────
+
     const onRoomJoined = useCallback(
         ({
             participants,
@@ -56,9 +71,7 @@ export function RoomShell({
                 "[RoomShell] room:joined, participants:",
                 participants.length,
             );
-            if (participants.length > 0) {
-                initiateOffers(participants);
-            }
+            if (participants.length > 0) initiateOffers(participants);
         },
         [initiateOffers],
     );
@@ -78,9 +91,7 @@ export function RoomShell({
     );
 
     const onParticipantLeft = useCallback(
-        ({ socketId }: { socketId: string }) => {
-            removePeer(socketId);
-        },
+        ({ socketId }: { socketId: string }) => removePeer(socketId),
         [removePeer],
     );
 
@@ -135,6 +146,8 @@ export function RoomShell({
         router.push("/?kicked=true");
     }, [router]);
 
+    // ─────────────────────────────────────────────────────────────────────────
+
     useSocket({
         socketRef,
         sessionToken,
@@ -149,30 +162,55 @@ export function RoomShell({
         onIceCandidate,
         onMutedByCreator,
         onKicked,
+        onChatHistory, // ← new
+        onChatMessage, // ← new
     });
 
     return (
-        <div className="flex flex-col h-screen">
-            {error ? (
-                <div className="border-b border-amber-500/40 bg-amber-950 px-4 py-3 text-sm text-amber-100">
-                    {error}. You can still join and receive other participants.
-                </div>
-            ) : null}
-            <VideoGrid
-                localStream={stream}
-                localDisplayName={displayName}
-                remoteStreams={Array.from(remoteStreams.values())}
-            />
-            <Controls
-                isMicOn={isMicOn}
-                isCameraOn={isCameraOn}
-                onToggleMic={toggleMic}
-                onToggleCamera={toggleCamera}
-                onLeave={() => {
-                    socketRef.current?.disconnect();
-                    router.push("/");
-                }}
-            />
+        <div className="flex h-screen overflow-hidden">
+            {/* Left: video + controls — shrinks when chat opens */}
+            <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+                {error ? (
+                    <div className="border-b border-amber-500/40 bg-amber-950 px-4 py-3 text-sm text-amber-100 shrink-0">
+                        {error}. You can still join and receive other
+                        participants.
+                    </div>
+                ) : null}
+
+                <VideoGrid
+                    localStream={stream}
+                    localDisplayName={displayName}
+                    remoteStreams={Array.from(remoteStreams.values())}
+                />
+
+                <Controls
+                    isMicOn={isMicOn}
+                    isCameraOn={isCameraOn}
+                    onToggleMic={toggleMic}
+                    onToggleCamera={toggleCamera}
+                    onLeave={() => {
+                        socketRef.current?.disconnect();
+                        router.push("/");
+                    }}
+                    onChatToggle={chatOpen ? closeChat : openChat} // ← new
+                    unreadCount={unreadCount} // ← new
+                />
+            </div>
+
+            {/* Right: chat sidebar — animates in/out */}
+            <div
+                className={`transition-[width] duration-300 ease-in-out overflow-hidden shrink-0 ${
+                    chatOpen ? "w-80" : "w-0"
+                }`}
+            >
+                {chatOpen && (
+                    <ChatPanel
+                        messages={messages}
+                        onSend={sendMessage}
+                        onClose={closeChat}
+                    />
+                )}
+            </div>
         </div>
     );
 }
