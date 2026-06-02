@@ -1,4 +1,4 @@
-// web/hooks/useSocket.ts
+// hooks/useSocket.ts
 "use client";
 import { useEffect } from "react";
 import { io } from "socket.io-client";
@@ -19,14 +19,14 @@ type UseSocketOptions = {
     onIceCandidate: (data: any) => void;
     onMutedByCreator: () => void;
     onKicked: () => void;
-    onChatHistory: (history: ChatMessage[]) => void; // ← new
+    onChatHistory: (history: ChatMessage[]) => void;
     onChatMessage: (msg: ChatMessage) => void;
+    onScreenShareStarted: (data: { fromSocketId: string }) => void; // ✅ NEW
+    onScreenShareStopped: (data: { fromSocketId: string }) => void; // ✅ NEW
 };
 
 export function useSocket(options: UseSocketOptions) {
     useEffect(() => {
-        // Create socket with auth data
-        console.log(process.env.NEXT_PUBLIC_SOCKET_URL!);
         const socket = io(process.env.NEXT_PUBLIC_SOCKET_URL!, {
             withCredentials: true,
             auth: {
@@ -36,7 +36,6 @@ export function useSocket(options: UseSocketOptions) {
             },
         });
 
-        // Populate the shared ref so useWebRTC can emit through it
         options.socketRef.current = socket;
 
         socket.on("connect", () => {
@@ -48,24 +47,9 @@ export function useSocket(options: UseSocketOptions) {
             console.error("Socket connection error:", err.message);
         });
 
-        socket.on("room:joined", (data) => {
-            console.log(
-                "Room joined, existing participants:",
-                data.participants,
-            );
-            options.onRoomJoined(data);
-        });
-
-        socket.on("room:participant-joined", (data) => {
-            console.log("Participant joined:", data);
-            options.onParticipantJoined(data);
-        });
-
-        socket.on("room:participant-left", (data) => {
-            console.log("Participant left:", data);
-            options.onParticipantLeft(data);
-        });
-
+        socket.on("room:joined", options.onRoomJoined);
+        socket.on("room:participant-joined", options.onParticipantJoined);
+        socket.on("room:participant-left", options.onParticipantLeft);
         socket.on("signal:offer", options.onOffer);
         socket.on("signal:answer", options.onAnswer);
         socket.on("signal:ice-candidate", options.onIceCandidate);
@@ -73,12 +57,16 @@ export function useSocket(options: UseSocketOptions) {
         socket.on("control:kicked", options.onKicked);
         socket.on("chat:history", options.onChatHistory);
         socket.on("chat:message", options.onChatMessage);
+        socket.on("signal:screen-share-started", options.onScreenShareStarted);
+        socket.on("signal:screen-share-stopped", options.onScreenShareStopped);
 
         socket.on("room:error", (data) => {
             console.error("Room error:", data.message);
         });
 
         return () => {
+            socket.off("signal:screen-share-started", options.onScreenShareStarted);
+            socket.off("signal:screen-share-stopped", options.onScreenShareStopped);
             socket.off("chat:history", options.onChatHistory);
             socket.off("chat:message", options.onChatMessage);
             socket.disconnect();

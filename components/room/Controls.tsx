@@ -1,12 +1,14 @@
 // components/room/Controls.tsx
 "use client";
-import { MessageSquare } from "lucide-react";
+import { MessageSquare, Monitor } from "lucide-react";
 
 type Props = {
     isMicOn: boolean;
     isCameraOn: boolean;
+    isScreenSharing: boolean; // ✅ NEW
     onToggleMic: () => void;
     onToggleCamera: () => void;
+    onToggleScreenShare: () => void; // ✅ NEW
     onLeave: () => void;
     onChatToggle: () => void;
     unreadCount: number;
@@ -15,8 +17,10 @@ type Props = {
 export function Controls({
     isMicOn,
     isCameraOn,
+    isScreenSharing,
     onToggleMic,
     onToggleCamera,
+    onToggleScreenShare,
     onLeave,
     onChatToggle,
     unreadCount,
@@ -36,9 +40,13 @@ export function Controls({
                 {isCameraOn ? "Stop video" : "Start video"}
             </button>
             <button
-                onClick={onLeave}
-                className="px-4 py-2 rounded-full bg-red-600 text-white"
+                onClick={onToggleScreenShare}
+                className={`px-4 py-2 rounded-full ${isScreenSharing ? "bg-blue-600" : "bg-gray-700"} text-white flex items-center gap-2`}
             >
+                <Monitor size={20} />
+                {isScreenSharing ? "Stop sharing" : "Share screen"}
+            </button>
+            <button onClick={onLeave} className="px-4 py-2 rounded-full bg-red-600 text-white">
                 Leave
             </button>
             <button

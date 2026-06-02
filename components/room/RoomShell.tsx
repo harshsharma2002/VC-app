@@ -1,3 +1,4 @@
+// components/room/RoomShell.tsx
 "use client";
 import { useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
@@ -17,21 +18,20 @@ type Props = {
     displayName: string;
 };
 
-export function RoomShell({
-    roomId,
-    sessionToken,
-    guestId,
-    displayName,
-}: Props) {
+export function RoomShell({ roomId, sessionToken, guestId, displayName }: Props) {
     const router = useRouter();
 
     const {
         stream,
+        screenStream,
         error,
         isMicOn,
         isCameraOn,
+        isScreenSharing,
         toggleMic,
         toggleCamera,
+        startScreenShare,
+        stopScreenShare,
         forceMute,
         streamReady,
     } = useMediaDevices();
@@ -46,6 +46,9 @@ export function RoomShell({
         handleAnswer,
         handleIceCandidate,
         removePeer,
+        replaceVideoTrack,
+        handleScreenShareStarted,
+        handleScreenShareStopped,
     } = useWebRTC(stream, socketRef, streamReady);
 
     const {
@@ -59,31 +62,42 @@ export function RoomShell({
         onChatMessage,
     } = useChat(socketRef, roomId);
 
-    // ── WebRTC callbacks (unchanged) ──────────────────────────────────────────
+    const handleScreenShareToggle = useCallback(async () => {
+        if (isScreenSharing) {
+            // Stop screen sharing
+            stopScreenShare();
+            
+            // Restore camera track
+            const cameraTrack = stream?.getVideoTracks()[0] ?? null;
+            await replaceVideoTrack(cameraTrack);
+            
+            // Notify others
+            socketRef.current?.emit("signal:screen-share-stopped");
+        } else {
+            // Start screen sharing
+            const screenStream = await startScreenShare();
+            if (!screenStream) return; // User cancelled
+            
+            // Replace camera with screen track
+            const screenTrack = screenStream.getVideoTracks()[0];
+            await replaceVideoTrack(screenTrack);
+            
+            // Notify others
+            socketRef.current?.emit("signal:screen-share-started");
+        }
+    }, [isScreenSharing, stopScreenShare, stream, replaceVideoTrack, startScreenShare]);
 
+    // WebRTC callbacks
     const onRoomJoined = useCallback(
-        ({
-            participants,
-        }: {
-            participants: Array<{ socketId: string; displayName: string }>;
-        }) => {
-            console.log(
-                "[RoomShell] room:joined, participants:",
-                participants.length,
-            );
+        ({ participants }: { participants: Array<{ socketId: string; displayName: string }> }) => {
+            console.log("[RoomShell] room:joined, participants:", participants.length);
             if (participants.length > 0) initiateOffers(participants);
         },
         [initiateOffers],
     );
 
     const onParticipantJoined = useCallback(
-        ({
-            socketId,
-            displayName: name,
-        }: {
-            socketId: string;
-            displayName: string;
-        }) => {
+        ({ socketId, displayName: name }: { socketId: string; displayName: string }) => {
             console.log("[RoomShell] participant-joined:", socketId);
             prepareForIncomingOffer(socketId, name);
         },
@@ -96,13 +110,7 @@ export function RoomShell({
     );
 
     const onOffer = useCallback(
-        ({
-            fromSocketId,
-            sdp,
-        }: {
-            fromSocketId: string;
-            sdp: RTCSessionDescriptionInit;
-        }) => {
+        ({ fromSocketId, sdp }: { fromSocketId: string; sdp: RTCSessionDescriptionInit }) => {
             console.log("[RoomShell] received offer from:", fromSocketId);
             handleOffer(fromSocketId, sdp);
         },
@@ -110,13 +118,7 @@ export function RoomShell({
     );
 
     const onAnswer = useCallback(
-        ({
-            fromSocketId,
-            sdp,
-        }: {
-            fromSocketId: string;
-            sdp: RTCSessionDescriptionInit;
-        }) => {
+        ({ fromSocketId, sdp }: { fromSocketId: string; sdp: RTCSessionDescriptionInit }) => {
             console.log("[RoomShell] received answer from:", fromSocketId);
             handleAnswer(fromSocketId, sdp);
         },
@@ -124,13 +126,7 @@ export function RoomShell({
     );
 
     const onIceCandidate = useCallback(
-        ({
-            fromSocketId,
-            candidate,
-        }: {
-            fromSocketId: string;
-            candidate: RTCIceCandidateInit;
-        }) => {
+        ({ fromSocketId, candidate }: { fromSocketId: string; candidate: RTCIceCandidateInit }) => {
             console.log("[RoomShell] received ICE from:", fromSocketId);
             handleIceCandidate(fromSocketId, candidate);
         },
@@ -146,7 +142,22 @@ export function RoomShell({
         router.push("/?kicked=true");
     }, [router]);
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // ✅ NEW: Screen share signaling callbacks
+    const onScreenShareStarted = useCallback(
+        ({ fromSocketId }: { fromSocketId: string }) => {
+            console.log("[RoomShell] Screen share started by:", fromSocketId);
+            handleScreenShareStarted(fromSocketId);
+        },
+        [handleScreenShareStarted],
+    );
+
+    const onScreenShareStopped = useCallback(
+        ({ fromSocketId }: { fromSocketId: string }) => {
+            console.log("[RoomShell] Screen share stopped by:", fromSocketId);
+            handleScreenShareStopped(fromSocketId);
+        },
+        [handleScreenShareStopped],
+    );
 
     useSocket({
         socketRef,
@@ -162,54 +173,47 @@ export function RoomShell({
         onIceCandidate,
         onMutedByCreator,
         onKicked,
-        onChatHistory, // ← new
-        onChatMessage, // ← new
+        onChatHistory,
+        onChatMessage,
+        onScreenShareStarted, // ✅ NEW
+        onScreenShareStopped, // ✅ NEW
     });
 
     return (
         <div className="flex h-screen overflow-hidden">
-            {/* Left: video + controls — shrinks when chat opens */}
             <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-                {error ? (
+                {error && (
                     <div className="border-b border-amber-500/40 bg-amber-950 px-4 py-3 text-sm text-amber-100 shrink-0">
-                        {error}. You can still join and receive other
-                        participants.
+                        {error}. You can still join and receive other participants.
                     </div>
-                ) : null}
+                )}
 
                 <VideoGrid
                     localStream={stream}
                     localDisplayName={displayName}
                     remoteStreams={Array.from(remoteStreams.values())}
+                    isScreenSharing={isScreenSharing}
+                    screenStream={screenStream}
                 />
 
                 <Controls
                     isMicOn={isMicOn}
                     isCameraOn={isCameraOn}
+                    isScreenSharing={isScreenSharing}
                     onToggleMic={toggleMic}
                     onToggleCamera={toggleCamera}
+                    onToggleScreenShare={handleScreenShareToggle} // ✅ NEW
                     onLeave={() => {
                         socketRef.current?.disconnect();
                         router.push("/");
                     }}
-                    onChatToggle={chatOpen ? closeChat : openChat} // ← new
-                    unreadCount={unreadCount} // ← new
+                    onChatToggle={chatOpen ? closeChat : openChat}
+                    unreadCount={unreadCount}
                 />
             </div>
 
-            {/* Right: chat sidebar — animates in/out */}
-            <div
-                className={`transition-[width] duration-300 ease-in-out overflow-hidden shrink-0 ${
-                    chatOpen ? "w-80" : "w-0"
-                }`}
-            >
-                {chatOpen && (
-                    <ChatPanel
-                        messages={messages}
-                        onSend={sendMessage}
-                        onClose={closeChat}
-                    />
-                )}
+            <div className={`transition-[width] duration-300 ease-in-out overflow-hidden shrink-0 ${chatOpen ? "w-80" : "w-0"}`}>
+                {chatOpen && <ChatPanel messages={messages} onSend={sendMessage} onClose={closeChat} />}
             </div>
         </div>
     );

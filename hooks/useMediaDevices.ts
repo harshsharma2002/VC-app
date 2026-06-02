@@ -1,12 +1,17 @@
+// hooks/useMediaDevices.ts
 "use client";
 import { useState, useEffect, useRef } from "react";
 
 export function useMediaDevices() {
     const [stream, setStream] = useState<MediaStream | null>(null);
+    const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [isMicOn, setIsMicOn] = useState(true);
     const [isCameraOn, setIsCameraOn] = useState(true);
+    const [isScreenSharing, setIsScreenSharing] = useState(false);
+
     const streamRef = useRef<MediaStream | null>(null);
+    const screenStreamRef = useRef<MediaStream | null>(null);
 
     const streamReadyRef = useRef<Promise<MediaStream>>(
         null as unknown as Promise<MediaStream>,
@@ -31,7 +36,9 @@ export function useMediaDevices() {
     useEffect(() => {
         return () => {
             streamRef.current?.getTracks().forEach((t) => t.stop());
+            screenStreamRef.current?.getTracks().forEach((t) => t.stop());
             streamRef.current = null;
+            screenStreamRef.current = null;
         };
     }, []);
 
@@ -41,16 +48,10 @@ export function useMediaDevices() {
             console.warn("[Media] No audio track found");
             return;
         }
-        // Always derive next state from actual track state, not React state
         const nextEnabled = !track.enabled;
         track.enabled = nextEnabled;
         setIsMicOn(nextEnabled);
-        console.log(
-            "[Media] Mic toggled:",
-            nextEnabled ? "ON" : "OFF",
-            "track.enabled:",
-            track.enabled,
-        );
+        console.log("[Media] Mic toggled:", nextEnabled ? "ON" : "OFF");
     };
 
     const toggleCamera = () => {
@@ -62,30 +63,41 @@ export function useMediaDevices() {
         const nextEnabled = !track.enabled;
         track.enabled = nextEnabled;
         setIsCameraOn(nextEnabled);
+    };
 
-        // Send a black frame when camera is off so remote sees black, not frozen
-        if (!nextEnabled) {
-            replaceVideoWithBlack();
-        } else {
-            restoreCamera();
+    const startScreenShare = async (): Promise<MediaStream | null> => {
+        try {
+            const displayStream = await navigator.mediaDevices.getDisplayMedia({
+                video: true,
+                audio: false, // Screen audio is complex, start without it
+            });
+
+            screenStreamRef.current = displayStream;
+            setScreenStream(displayStream);
+            setIsScreenSharing(true);
+
+            // Listen for user clicking browser's "Stop sharing" button
+            displayStream.getVideoTracks()[0].onended = () => {
+                stopScreenShare();
+            };
+
+            console.log("[Media] Screen sharing started");
+            return displayStream;
+        } catch (err) {
+            console.error("[Media] Screen share failed:", err);
+            setError("Could not start screen sharing");
+            return null;
         }
     };
 
-    const replaceVideoWithBlack = () => {
-        const track = streamRef.current?.getVideoTracks()[0];
-        if (!track) return;
-        // Create a black canvas stream and replace the track in all peer connections
-        // For local preview — just disable shows black on most browsers with this:
-        track.enabled = false;
-        // The remote freeze is a WebRTC limitation — fixing it properly requires
-        // renegotiation (Phase 5). For now, disabling is the correct approach and
-        // modern browsers will show black on the sender side.
-    };
+    const stopScreenShare = () => {
+        if (!screenStreamRef.current) return;
 
-    const restoreCamera = () => {
-        const track = streamRef.current?.getVideoTracks()[0];
-        if (!track) return;
-        track.enabled = true;
+        screenStreamRef.current.getTracks().forEach((t) => t.stop());
+        screenStreamRef.current = null;
+        setScreenStream(null);
+        setIsScreenSharing(false);
+        console.log("[Media] Screen sharing stopped");
     };
 
     const forceMute = () => {
@@ -98,11 +110,15 @@ export function useMediaDevices() {
 
     return {
         stream,
+        screenStream,
         error,
         isMicOn,
         isCameraOn,
+        isScreenSharing,
         toggleMic,
         toggleCamera,
+        startScreenShare,
+        stopScreenShare,
         forceMute,
         streamReady: streamReadyRef.current,
     };
