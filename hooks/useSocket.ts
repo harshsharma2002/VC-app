@@ -21,8 +21,9 @@ type UseSocketOptions = {
     onKicked: () => void;
     onChatHistory: (history: ChatMessage[]) => void;
     onChatMessage: (msg: ChatMessage) => void;
-    onScreenShareStarted: (data: { fromSocketId: string }) => void; // ✅ NEW
-    onScreenShareStopped: (data: { fromSocketId: string }) => void; // ✅ NEW
+    onScreenShareStarted: (data: { fromSocketId: string }) => void;
+    onScreenShareStopped: (data: { fromSocketId: string }) => void;
+    onParticipantMuted: (data: { socketId: string }) => void;
 };
 
 export function useSocket(options: UseSocketOptions) {
@@ -64,13 +65,22 @@ export function useSocket(options: UseSocketOptions) {
             console.error("Room error:", data.message);
         });
 
+        socket.on("control:participant-muted", options.onParticipantMuted);
+
         return () => {
-            socket.off("signal:screen-share-started", options.onScreenShareStarted);
-            socket.off("signal:screen-share-stopped", options.onScreenShareStopped);
+            socket.off(
+                "signal:screen-share-started",
+                options.onScreenShareStarted,
+            );
+            socket.off(
+                "signal:screen-share-stopped",
+                options.onScreenShareStopped,
+            );
             socket.off("chat:history", options.onChatHistory);
             socket.off("chat:message", options.onChatMessage);
             socket.disconnect();
             options.socketRef.current = null;
+            socket.off("control:participant-muted", options.onParticipantMuted);
         };
     }, [options.roomId]);
 }

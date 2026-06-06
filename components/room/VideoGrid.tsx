@@ -17,44 +17,47 @@ export function VideoGrid({
     isScreenSharing,
     screenStream,
 }: Props) {
-    // Find if anyone is screen sharing
-    const screenSharer = remoteStreams.find((rs) => rs.isScreenShare);
+    // Find all screen shares (including local)
+    const screenSharers = remoteStreams.filter((rs) => rs.isScreenShare);
     const regularStreams = remoteStreams.filter((rs) => !rs.isScreenShare);
+    
+    const allScreenShares = [
+        ...(isScreenSharing && screenStream
+            ? [{ stream: screenStream, displayName: `${localDisplayName} (your screen)`, isLocal: true }]
+            : []),
+        ...screenSharers.map((rs) => ({
+            stream: rs.stream,
+            displayName: `${rs.displayName} (screen)`,
+            isLocal: false,
+        })),
+    ];
 
-    // If someone is screen sharing, show it large
-    if (screenSharer) {
+    // Multiple screen shares: grid layout for screens + sidebar for cameras
+    if (allScreenShares.length > 0) {
+        const screenGridCols = allScreenShares.length === 1 ? "grid-cols-1" : "grid-cols-2";
+
         return (
             <div className="flex-1 flex gap-2 p-4 overflow-hidden">
-                {/* Main screen share view */}
-                <div className="flex-1 flex items-center justify-center bg-black rounded-lg overflow-hidden">
-                    <VideoTile
-                        stream={screenSharer.stream}
-                        displayName={`${screenSharer.displayName} (screen)`}
-                        isScreenShare
-                    />
-                </div>
-
-                {/* Sidebar with participant thumbnails */}
-                <div className="w-48 flex flex-col gap-2 overflow-y-auto">
-                    <VideoTile stream={localStream} displayName={`${localDisplayName} (you)`} muted />
-                    {regularStreams.map((rs) => (
-                        <VideoTile key={rs.socketId} stream={rs.stream} displayName={rs.displayName} />
+                {/* Main screen share grid */}
+                <div className={`flex-1 grid ${screenGridCols} gap-2`}>
+                    {allScreenShares.map((screen, idx) => (
+                        <div key={idx} className="bg-black rounded-lg overflow-hidden">
+                            <VideoTile
+                                stream={screen.stream}
+                                displayName={screen.displayName}
+                                muted={screen.isLocal}
+                                isScreenShare
+                            />
+                        </div>
                     ))}
                 </div>
-            </div>
-        );
-    }
 
-    // If local user is screen sharing
-    if (isScreenSharing && screenStream) {
-        return (
-            <div className="flex-1 flex gap-2 p-4 overflow-hidden">
-                <div className="flex-1 flex items-center justify-center bg-black rounded-lg overflow-hidden">
-                    <VideoTile stream={screenStream} displayName={`${localDisplayName} (your screen)`} muted isScreenShare />
-                </div>
+                {/* Sidebar with camera feeds */}
                 <div className="w-48 flex flex-col gap-2 overflow-y-auto">
-                    <VideoTile stream={localStream} displayName={`${localDisplayName} (camera)`} muted />
-                    {remoteStreams.map((rs) => (
+                    {!isScreenSharing && (
+                        <VideoTile stream={localStream} displayName={`${localDisplayName} (you)`} muted />
+                    )}
+                    {regularStreams.map((rs) => (
                         <VideoTile key={rs.socketId} stream={rs.stream} displayName={rs.displayName} />
                     ))}
                 </div>

@@ -1,15 +1,16 @@
 // components/room/RoomShell.tsx
 "use client";
-import { useEffect } from "react";
-import { useRef, useCallback } from "react";
+import { useRef, useCallback, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useMediaDevices } from "@/hooks/useMediaDevices";
 import { useWebRTC } from "@/hooks/useWebRTC";
 import { useSocket } from "@/hooks/useSocket";
 import { useChat } from "@/hooks/useChat";
+import { useParticipants } from "@/hooks/useParticipants";
 import { VideoGrid } from "./VideoGrid";
 import { Controls } from "./Controls";
 import { ChatPanel } from "./ChatPanel";
+import { ParticipantsPanel } from "./ParticipantsPanel";
 import type { Socket } from "socket.io-client";
 
 type Props = {
@@ -26,6 +27,7 @@ export function RoomShell({
     displayName,
 }: Props) {
     const router = useRouter();
+    const [isCreator, setIsCreator] = useState(false);
 
     const {
         stream,
@@ -69,30 +71,33 @@ export function RoomShell({
         onChatMessage,
     } = useChat(socketRef, roomId);
 
+    const {
+        participants,
+        isOpen: participantsOpen,
+        openPanel,
+        closePanel,
+        muteParticipant,
+        kickParticipant,
+        onRoomJoined: onParticipantsRoomJoined,
+        onParticipantJoined: onParticipantsParticipantJoined,
+        onParticipantLeft: onParticipantsParticipantLeft,
+        onParticipantMuted,
+    } = useParticipants(socketRef);
+
     const handleScreenShareToggle = useCallback(async () => {
         if (isScreenSharing) {
             console.log("[RoomShell] Stopping screen share");
-            // Stop screen sharing
             stopScreenShare();
-
-            // Remove screen track from all peers
             await removeScreenTrack();
-
-            // Notify others
             socketRef.current?.emit("signal:screen-share-stopped");
         } else {
             console.log("[RoomShell] Starting screen share");
-            // Start screen sharing
             const screenStream = await startScreenShare();
             if (!screenStream) {
                 console.log("[RoomShell] Screen share cancelled by user");
                 return;
             }
-
-            // Add screen track to all peers
             await addScreenTrack(screenStream);
-
-            // Notify others
             socketRef.current?.emit("signal:screen-share-started");
         }
     }, [
@@ -103,63 +108,42 @@ export function RoomShell({
         addScreenTrack,
     ]);
 
-    // Add this to RoomShell.tsx temporarily for debugging
-    useEffect(() => {
-        console.log("=== RoomShell State ===");
-        console.log(
-            "Local stream tracks:",
-            stream
-                ?.getTracks()
-                .map((t) => `${t.kind} ${t.id} enabled=${t.enabled}`),
-        );
-        console.log(
-            "Screen stream tracks:",
-            screenStream?.getTracks().map((t) => `${t.kind} ${t.id}`),
-        );
-        console.log(
-            "Remote streams:",
-            Array.from(remoteStreams.values()).map((rs) => ({
-                socketId: rs.socketId,
-                displayName: rs.displayName,
-                tracks: rs.stream.getTracks().map((t) => `${t.kind} ${t.id}`),
-                isScreenShare: rs.isScreenShare,
-            })),
-        );
-    }, [stream, screenStream, remoteStreams]);
-
-    // WebRTC callbacks
     const onRoomJoined = useCallback(
-        ({
-            participants,
-        }: {
+        (data: {
             participants: Array<{ socketId: string; displayName: string }>;
+            isCreator: boolean;
         }) => {
             console.log(
                 "[RoomShell] room:joined, participants:",
-                participants.length,
+                data.participants.length,
             );
-            if (participants.length > 0) initiateOffers(participants);
+            setIsCreator(data.isCreator);
+            onParticipantsRoomJoined(data as any);
+            if (data.participants.length > 0) initiateOffers(data.participants);
         },
-        [initiateOffers],
+        [initiateOffers, onParticipantsRoomJoined],
     );
 
     const onParticipantJoined = useCallback(
-        ({
-            socketId,
-            displayName: name,
-        }: {
+        (data: {
             socketId: string;
             displayName: string;
+            isMuted: boolean;
+            isCreator: boolean;
         }) => {
-            console.log("[RoomShell] participant-joined:", socketId);
-            prepareForIncomingOffer(socketId, name);
+            console.log("[RoomShell] participant-joined:", data.socketId);
+            onParticipantsParticipantJoined(data);
+            prepareForIncomingOffer(data.socketId, data.displayName);
         },
-        [prepareForIncomingOffer],
+        [prepareForIncomingOffer, onParticipantsParticipantJoined],
     );
 
     const onParticipantLeft = useCallback(
-        ({ socketId }: { socketId: string }) => removePeer(socketId),
-        [removePeer],
+        (data: { socketId: string }) => {
+            onParticipantsParticipantLeft(data);
+            removePeer(data.socketId);
+        },
+        [removePeer, onParticipantsParticipantLeft],
     );
 
     const onOffer = useCallback(
@@ -213,7 +197,6 @@ export function RoomShell({
         router.push("/?kicked=true");
     }, [router]);
 
-    // ✅ NEW: Screen share signaling callbacks
     const onScreenShareStarted = useCallback(
         ({ fromSocketId }: { fromSocketId: string }) => {
             console.log("[RoomShell] Screen share started by:", fromSocketId);
@@ -246,8 +229,9 @@ export function RoomShell({
         onKicked,
         onChatHistory,
         onChatMessage,
-        onScreenShareStarted, // ✅ NEW
-        onScreenShareStopped, // ✅ NEW
+        onScreenShareStarted,
+        onScreenShareStopped,
+        onParticipantMuted,
     });
 
     return (
@@ -274,18 +258,41 @@ export function RoomShell({
                     isScreenSharing={isScreenSharing}
                     onToggleMic={toggleMic}
                     onToggleCamera={toggleCamera}
-                    onToggleScreenShare={handleScreenShareToggle} // ✅ NEW
+                    onToggleScreenShare={handleScreenShareToggle}
                     onLeave={() => {
                         socketRef.current?.disconnect();
                         router.push("/");
                     }}
                     onChatToggle={chatOpen ? closeChat : openChat}
+                    onParticipantsToggle={
+                        participantsOpen ? closePanel : openPanel
+                    }
                     unreadCount={unreadCount}
+                    participantCount={participants.length + 1}
                 />
             </div>
-
             <div
-                className={`transition-[width] duration-300 ease-in-out overflow-hidden shrink-0 ${chatOpen ? "w-80" : "w-0"}`}
+                className={`transition-[width] duration-300 ease-in-out overflow-hidden shrink-0 ${
+                    participantsOpen ? "w-80" : "w-0"
+                }`}
+            >
+                {participantsOpen && (
+                    <ParticipantsPanel
+                        localDisplayName={displayName}
+                        isLocalCreator={isCreator}
+                        participants={participants}
+                        onMuteParticipant={muteParticipant}
+                        onKickParticipant={kickParticipant}
+                        onClose={closePanel}
+                    />
+                )}
+            </div>
+
+            {/* Chat Panel */}
+            <div
+                className={`transition-[width] duration-300 ease-in-out overflow-hidden shrink-0 ${
+                    chatOpen ? "w-80" : "w-0"
+                }`}
             >
                 {chatOpen && (
                     <ChatPanel
