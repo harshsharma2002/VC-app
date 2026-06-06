@@ -28,6 +28,8 @@ export function useWebRTC(
     const screenStreamRef = useRef<MediaStream | null>(null);
     const [remoteStreams, setRemoteStreams] = useState<Map<string, RemoteStream>>(new Map());
     const tracksReadyMap = useRef<Map<string, Promise<void>>>(new Map());
+    const makingOffer = useRef<Map<string, boolean>>(new Map()); // ✅ Track ongoing offers
+    const ignoreOffer = useRef<Map<string, boolean>>(new Map()); // ✅ Track if we should ignore offers
 
     useEffect(() => {
         localStreamRef.current = localStream;
@@ -40,6 +42,8 @@ export function useWebRTC(
             peerConnections.current.delete(socketId);
         }
         tracksReadyMap.current.delete(socketId);
+        makingOffer.current.delete(socketId);
+        ignoreOffer.current.delete(socketId);
         setRemoteStreams((prev) => {
             const next = new Map(prev);
             next.delete(socketId);
@@ -90,7 +94,6 @@ export function useWebRTC(
                     const next = new Map(prev);
                     const existing = next.get(socketId);
                     
-                    // Check if this is a screen share track (heuristic: large resolution or label)
                     const isScreenTrack = event.track.label.includes('screen') || 
                                          event.track.label.includes('window');
                     
@@ -121,18 +124,22 @@ export function useWebRTC(
                 }
             };
 
+            // ✅ FIXED: Perfect negotiation pattern
             pc.onnegotiationneeded = async () => {
                 console.log(`[WebRTC] ⚡ Renegotiation needed for ${socketId}`);
+                
                 try {
-                    const offer = await pc.createOffer();
-                    await pc.setLocalDescription(offer);
-                    console.log(`[WebRTC] Sending renegotiation offer to ${socketId}`);
+                    makingOffer.current.set(socketId, true);
+                    await pc.setLocalDescription();
+                    console.log(`[WebRTC] Sending ${pc.localDescription?.type} to ${socketId}`);
                     socketRef.current?.emit("signal:offer", {
                         targetSocketId: socketId,
-                        sdp: offer,
+                        sdp: pc.localDescription,
                     });
                 } catch (err) {
-                    console.error("[WebRTC] Renegotiation failed:", err);
+                    console.error("[WebRTC] Failed to create offer:", err);
+                } finally {
+                    makingOffer.current.set(socketId, false);
                 }
             };
 
@@ -142,7 +149,6 @@ export function useWebRTC(
         [removePeer, attachLocalTracks, socketRef],
     );
 
-    // NEW: Add screen share track to all peers
     const addScreenTrack = useCallback(async (screenStream: MediaStream) => {
         console.log("[WebRTC] Adding screen track to all peers");
         screenStreamRef.current = screenStream;
@@ -156,11 +162,9 @@ export function useWebRTC(
         for (const [socketId, pc] of peerConnections.current.entries()) {
             console.log(`[WebRTC] Adding screen track to peer ${socketId}`);
             pc.addTrack(screenTrack, screenStream);
-            // onnegotiationneeded will fire automatically
         }
     }, []);
 
-    // NEW: Remove screen share track from all peers
     const removeScreenTrack = useCallback(async () => {
         console.log("[WebRTC] Removing screen track from all peers");
         
@@ -177,7 +181,6 @@ export function useWebRTC(
             if (sender) {
                 console.log(`[WebRTC] Removing screen sender from peer ${socketId}`);
                 pc.removeTrack(sender);
-                // onnegotiationneeded will fire automatically
             }
         }
 
@@ -197,12 +200,22 @@ export function useWebRTC(
 
             for (const participant of participants) {
                 const pc = createPeerConnection(participant.socketId, participant.displayName);
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-                socketRef.current?.emit("signal:offer", {
-                    targetSocketId: participant.socketId,
-                    sdp: offer,
-                });
+                
+                // ✅ Initial offer (only for existing participants when we join)
+                try {
+                    makingOffer.current.set(participant.socketId, true);
+                    const offer = await pc.createOffer();
+                    await pc.setLocalDescription(offer);
+                    console.log(`[WebRTC] Sending initial offer to ${participant.socketId}`);
+                    socketRef.current?.emit("signal:offer", {
+                        targetSocketId: participant.socketId,
+                        sdp: offer,
+                    });
+                } catch (err) {
+                    console.error(`[WebRTC] Failed to create initial offer for ${participant.socketId}:`, err);
+                } finally {
+                    makingOffer.current.set(participant.socketId, false);
+                }
             }
         },
         [createPeerConnection, streamReady, socketRef],
@@ -210,14 +223,14 @@ export function useWebRTC(
 
     const prepareForIncomingOffer = useCallback(
         (socketId: string, displayName: string) => {
-            createPeerConnection(socketId, displayName);
+            const pc = createPeerConnection(socketId, displayName);
 
             const tracksReady = streamReady
                 .then((stream) => {
                     localStreamRef.current = stream;
-                    const pc = peerConnections.current.get(socketId);
-                    if (!pc) return;
-                    const attached = attachLocalTracks(pc, stream);
+                    const currentPc = peerConnections.current.get(socketId);
+                    if (!currentPc) return;
+                    const attached = attachLocalTracks(currentPc, stream);
                     if (attached) {
                         console.log("[WebRTC] tracks attached for incoming peer", socketId);
                     }
@@ -230,6 +243,7 @@ export function useWebRTC(
         [attachLocalTracks, createPeerConnection, streamReady],
     );
 
+    // ✅ FIXED: Perfect negotiation pattern for handling offers
     const handleOffer = useCallback(
         async (fromSocketId: string, sdp: RTCSessionDescriptionInit) => {
             console.log("[WebRTC] Handling offer from", fromSocketId);
@@ -238,22 +252,40 @@ export function useWebRTC(
                 console.error("[WebRTC] No peer connection found for", fromSocketId);
                 return;
             }
-            
+
             const tracksReady = tracksReadyMap.current.get(fromSocketId);
             if (tracksReady) {
                 console.log("[WebRTC] Waiting for tracks to be ready...");
                 await tracksReady;
             }
-            
-            await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            
-            console.log("[WebRTC] Sending answer to", fromSocketId);
-            socketRef.current?.emit("signal:answer", {
-                targetSocketId: fromSocketId,
-                sdp: answer,
-            });
+
+            // ✅ Perfect negotiation: resolve collisions
+            const offerCollision =
+                sdp.type === "offer" &&
+                (makingOffer.current.get(fromSocketId) || pc.signalingState !== "stable");
+
+            const polite = (socketRef.current?.id ?? "") < fromSocketId;
+            ignoreOffer.current.set(fromSocketId, !polite && offerCollision);
+
+            if (ignoreOffer.current.get(fromSocketId)) {
+                console.log(`[WebRTC] Ignoring offer from ${fromSocketId} (impolite collision)`);
+                return;
+            }
+
+            try {
+                await pc.setRemoteDescription(sdp);
+                
+                if (sdp.type === "offer") {
+                    await pc.setLocalDescription();
+                    console.log("[WebRTC] Sending answer to", fromSocketId);
+                    socketRef.current?.emit("signal:answer", {
+                        targetSocketId: fromSocketId,
+                        sdp: pc.localDescription,
+                    });
+                }
+            } catch (err) {
+                console.error(`[WebRTC] Failed to handle offer from ${fromSocketId}:`, err);
+            }
         },
         [socketRef],
     );
@@ -262,8 +294,17 @@ export function useWebRTC(
         async (fromSocketId: string, sdp: RTCSessionDescriptionInit) => {
             console.log("[WebRTC] Handling answer from", fromSocketId);
             const pc = peerConnections.current.get(fromSocketId);
-            if (!pc) return;
-            await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+            if (!pc) {
+                console.warn(`[WebRTC] No peer connection for ${fromSocketId}, ignoring answer`);
+                return;
+            }
+
+            try {
+                await pc.setRemoteDescription(sdp);
+                console.log(`[WebRTC] ✓ Remote description set for ${fromSocketId}`);
+            } catch (err) {
+                console.error(`[WebRTC] Failed to set remote description for ${fromSocketId}:`, err);
+            }
         },
         [],
     );
@@ -272,7 +313,14 @@ export function useWebRTC(
         async (fromSocketId: string, candidate: RTCIceCandidateInit) => {
             const pc = peerConnections.current.get(fromSocketId);
             if (!pc) return;
-            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+            
+            try {
+                await pc.addIceCandidate(new RTCIceCandidate(candidate));
+            } catch (err) {
+                if (!ignoreOffer.current.get(fromSocketId)) {
+                    console.error(`[WebRTC] Failed to add ICE candidate from ${fromSocketId}:`, err);
+                }
+            }
         },
         [],
     );
