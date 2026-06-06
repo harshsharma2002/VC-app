@@ -25,69 +25,13 @@ export function useWebRTC(
 ) {
     const peerConnections = useRef<Map<string, RTCPeerConnection>>(new Map());
     const localStreamRef = useRef<MediaStream | null>(null);
-    const [remoteStreams, setRemoteStreams] = useState<
-        Map<string, RemoteStream>
-    >(new Map());
+    const screenStreamRef = useRef<MediaStream | null>(null);
+    const [remoteStreams, setRemoteStreams] = useState<Map<string, RemoteStream>>(new Map());
     const tracksReadyMap = useRef<Map<string, Promise<void>>>(new Map());
 
     useEffect(() => {
         localStreamRef.current = localStream;
     }, [localStream]);
-
-    // Sync tracks when local stream changes
-    useEffect(() => {
-        const syncPeers = async () => {
-            for (const pc of peerConnections.current.values()) {
-                const senders = pc.getSenders();
-                const tracks = localStream?.getTracks() ?? [];
-
-                for (const sender of senders) {
-                    const nextTrack =
-                        tracks.find(
-                            (track) => track.kind === sender.track?.kind,
-                        ) ?? null;
-                    if (sender.track !== nextTrack) {
-                        await sender.replaceTrack(nextTrack);
-                    }
-                }
-
-                if (localStream) {
-                    for (const track of tracks) {
-                        const alreadyAttached = senders.some(
-                            (sender) => sender.track?.kind === track.kind,
-                        );
-                        if (!alreadyAttached) {
-                            pc.addTrack(track, localStream);
-                        }
-                    }
-                }
-            }
-        };
-
-        void syncPeers();
-    }, [localStream]);
-
-    const replaceVideoTrack = useCallback(
-        async (newVideoTrack: MediaStreamTrack | null) => {
-            console.log("[WebRTC] Replacing video track for all peers");
-
-            for (const pc of peerConnections.current.values()) {
-                const sender = pc
-                    .getSenders()
-                    .find((s) => s.track?.kind === "video");
-
-                if (sender) {
-                    await sender.replaceTrack(newVideoTrack);
-                    console.log("[WebRTC] Video track replaced");
-                } else if (newVideoTrack) {
-                    // No video sender exists yet, add the track
-                    pc.addTrack(newVideoTrack, localStreamRef.current!);
-                    console.log("[WebRTC] Video track added");
-                }
-            }
-        },
-        [],
-    );
 
     const removePeer = useCallback((socketId: string) => {
         const pc = peerConnections.current.get(socketId);
@@ -103,45 +47,59 @@ export function useWebRTC(
         });
     }, []);
 
-    const attachLocalTracks = useCallback(
-        (pc: RTCPeerConnection, stream: MediaStream) => {
-            let attached = false;
+    const attachLocalTracks = useCallback((pc: RTCPeerConnection, stream: MediaStream) => {
+        let attached = false;
 
-            stream.getTracks().forEach((track) => {
-                const alreadyAttached = pc
-                    .getSenders()
-                    .some((sender) => sender.track?.id === track.id);
-                if (alreadyAttached) {
-                    return;
-                }
+        stream.getTracks().forEach((track) => {
+            const alreadyAttached = pc.getSenders().some((sender) => sender.track?.id === track.id);
+            if (alreadyAttached) {
+                console.log("[WebRTC] Track already attached:", track.kind, track.id);
+                return;
+            }
 
-                pc.addTrack(track, stream);
-                attached = true;
-            });
+            console.log("[WebRTC] Adding track:", track.kind, track.id);
+            pc.addTrack(track, stream);
+            attached = true;
+        });
 
-            return attached;
-        },
-        [],
-    );
+        return attached;
+    }, []);
 
     const createPeerConnection = useCallback(
         (socketId: string, displayName: string): RTCPeerConnection => {
+            console.log("[WebRTC] Creating peer connection for:", socketId);
             const pc = new RTCPeerConnection(ICE_SERVERS);
 
+            // Attach camera stream if available
             if (localStreamRef.current) {
+                console.log("[WebRTC] Attaching local camera tracks");
                 attachLocalTracks(pc, localStreamRef.current);
             }
 
+            // Attach screen stream if available
+            if (screenStreamRef.current) {
+                console.log("[WebRTC] Attaching screen share tracks");
+                attachLocalTracks(pc, screenStreamRef.current);
+            }
+
             pc.ontrack = (event) => {
+                console.log("[WebRTC] ontrack event from", socketId, event.track.kind);
                 const [remoteStream] = event.streams;
+                
                 setRemoteStreams((prev) => {
                     const next = new Map(prev);
+                    const existing = next.get(socketId);
+                    
+                    // Check if this is a screen share track (heuristic: large resolution or label)
+                    const isScreenTrack = event.track.label.includes('screen') || 
+                                         event.track.label.includes('window');
+                    
                     next.set(socketId, {
                         socketId,
-                        displayName,
+                        displayName: existing?.displayName ?? displayName,
                         stream: remoteStream,
-                        isMuted: false,
-                        isScreenShare: false, // Will be updated via signaling
+                        isMuted: existing?.isMuted ?? false,
+                        isScreenShare: existing?.isScreenShare ?? isScreenTrack,
                     });
                     return next;
                 });
@@ -157,24 +115,18 @@ export function useWebRTC(
             };
 
             pc.onconnectionstatechange = () => {
-                console.log(
-                    `[WebRTC] ${socketId} connection state:`,
-                    pc.connectionState,
-                );
-                if (
-                    pc.connectionState === "failed" ||
-                    pc.connectionState === "closed"
-                ) {
+                console.log(`[WebRTC] ${socketId} connection state:`, pc.connectionState);
+                if (pc.connectionState === "failed" || pc.connectionState === "closed") {
                     removePeer(socketId);
                 }
             };
 
             pc.onnegotiationneeded = async () => {
-                console.log(`[WebRTC] Renegotiation needed for ${socketId}`);
-                // This fires when we add/replace tracks
+                console.log(`[WebRTC] ⚡ Renegotiation needed for ${socketId}`);
                 try {
                     const offer = await pc.createOffer();
                     await pc.setLocalDescription(offer);
+                    console.log(`[WebRTC] Sending renegotiation offer to ${socketId}`);
                     socketRef.current?.emit("signal:offer", {
                         targetSocketId: socketId,
                         sdp: offer,
@@ -187,34 +139,64 @@ export function useWebRTC(
             peerConnections.current.set(socketId, pc);
             return pc;
         },
-        [removePeer, attachLocalTracks],
+        [removePeer, attachLocalTracks, socketRef],
     );
 
+    // NEW: Add screen share track to all peers
+    const addScreenTrack = useCallback(async (screenStream: MediaStream) => {
+        console.log("[WebRTC] Adding screen track to all peers");
+        screenStreamRef.current = screenStream;
+        
+        const screenTrack = screenStream.getVideoTracks()[0];
+        if (!screenTrack) {
+            console.error("[WebRTC] No video track in screen stream!");
+            return;
+        }
+
+        for (const [socketId, pc] of peerConnections.current.entries()) {
+            console.log(`[WebRTC] Adding screen track to peer ${socketId}`);
+            pc.addTrack(screenTrack, screenStream);
+            // onnegotiationneeded will fire automatically
+        }
+    }, []);
+
+    // NEW: Remove screen share track from all peers
+    const removeScreenTrack = useCallback(async () => {
+        console.log("[WebRTC] Removing screen track from all peers");
+        
+        if (!screenStreamRef.current) {
+            console.warn("[WebRTC] No screen stream to remove");
+            return;
+        }
+
+        const screenTrack = screenStreamRef.current.getVideoTracks()[0];
+        if (!screenTrack) return;
+
+        for (const [socketId, pc] of peerConnections.current.entries()) {
+            const sender = pc.getSenders().find(s => s.track?.id === screenTrack.id);
+            if (sender) {
+                console.log(`[WebRTC] Removing screen sender from peer ${socketId}`);
+                pc.removeTrack(sender);
+                // onnegotiationneeded will fire automatically
+            }
+        }
+
+        screenStreamRef.current = null;
+    }, []);
+
     const initiateOffers = useCallback(
-        async (
-            participants: Array<{ socketId: string; displayName: string }>,
-        ) => {
+        async (participants: Array<{ socketId: string; displayName: string }>) => {
             let readyStream: MediaStream | null = null;
             try {
                 readyStream = await streamReady;
                 localStreamRef.current = readyStream;
-                console.log(
-                    "[WebRTC] stream ready, initiating offers to",
-                    participants.length,
-                    "peers",
-                );
+                console.log("[WebRTC] stream ready, initiating offers to", participants.length, "peers");
             } catch (err) {
-                console.warn(
-                    "[WebRTC] getUserMedia failed, continuing receive-only:",
-                    err,
-                );
+                console.warn("[WebRTC] getUserMedia failed, continuing receive-only:", err);
             }
 
             for (const participant of participants) {
-                const pc = createPeerConnection(
-                    participant.socketId,
-                    participant.displayName,
-                );
+                const pc = createPeerConnection(participant.socketId, participant.displayName);
                 const offer = await pc.createOffer();
                 await pc.setLocalDescription(offer);
                 socketRef.current?.emit("signal:offer", {
@@ -223,7 +205,7 @@ export function useWebRTC(
                 });
             }
         },
-        [createPeerConnection, streamReady],
+        [createPeerConnection, streamReady, socketRef],
     );
 
     const prepareForIncomingOffer = useCallback(
@@ -237,18 +219,11 @@ export function useWebRTC(
                     if (!pc) return;
                     const attached = attachLocalTracks(pc, stream);
                     if (attached) {
-                        console.log(
-                            "[WebRTC] tracks attached for incoming peer",
-                            socketId,
-                        );
+                        console.log("[WebRTC] tracks attached for incoming peer", socketId);
                     }
                 })
                 .catch((err) => {
-                    console.warn(
-                        "[WebRTC] getUserMedia failed, peer will be receive-only",
-                        socketId,
-                        err,
-                    );
+                    console.warn("[WebRTC] getUserMedia failed, peer will be receive-only", socketId, err);
                 });
             tracksReadyMap.current.set(socketId, tracksReady);
         },
@@ -257,23 +232,35 @@ export function useWebRTC(
 
     const handleOffer = useCallback(
         async (fromSocketId: string, sdp: RTCSessionDescriptionInit) => {
+            console.log("[WebRTC] Handling offer from", fromSocketId);
             const pc = peerConnections.current.get(fromSocketId);
-            if (!pc) return;
+            if (!pc) {
+                console.error("[WebRTC] No peer connection found for", fromSocketId);
+                return;
+            }
+            
             const tracksReady = tracksReadyMap.current.get(fromSocketId);
-            if (tracksReady) await tracksReady;
+            if (tracksReady) {
+                console.log("[WebRTC] Waiting for tracks to be ready...");
+                await tracksReady;
+            }
+            
             await pc.setRemoteDescription(new RTCSessionDescription(sdp));
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
+            
+            console.log("[WebRTC] Sending answer to", fromSocketId);
             socketRef.current?.emit("signal:answer", {
                 targetSocketId: fromSocketId,
                 sdp: answer,
             });
         },
-        [],
+        [socketRef],
     );
 
     const handleAnswer = useCallback(
         async (fromSocketId: string, sdp: RTCSessionDescriptionInit) => {
+            console.log("[WebRTC] Handling answer from", fromSocketId);
             const pc = peerConnections.current.get(fromSocketId);
             if (!pc) return;
             await pc.setRemoteDescription(new RTCSessionDescription(sdp));
@@ -291,6 +278,7 @@ export function useWebRTC(
     );
 
     const handleScreenShareStarted = useCallback((fromSocketId: string) => {
+        console.log("[WebRTC] Screen share started by", fromSocketId);
         setRemoteStreams((prev) => {
             const next = new Map(prev);
             const existing = next.get(fromSocketId);
@@ -302,6 +290,7 @@ export function useWebRTC(
     }, []);
 
     const handleScreenShareStopped = useCallback((fromSocketId: string) => {
+        console.log("[WebRTC] Screen share stopped by", fromSocketId);
         setRemoteStreams((prev) => {
             const next = new Map(prev);
             const existing = next.get(fromSocketId);
@@ -320,7 +309,8 @@ export function useWebRTC(
         handleAnswer,
         handleIceCandidate,
         removePeer,
-        replaceVideoTrack,
+        addScreenTrack,
+        removeScreenTrack,
         handleScreenShareStarted,
         handleScreenShareStopped,
     };
